@@ -1,0 +1,16 @@
+# Fichiers temporaires de R et RStudio
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Dossiers et fichiers intermédiaires du Knit
+*_cache/
+*_files/
+*.knit.md
+*.utf8.md
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+desktop.ini
