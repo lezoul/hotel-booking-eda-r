@@ -24,6 +24,8 @@ knitr::opts_chunk$set(
 )
 ```
 
+**Dépôt GitHub (code source, données et rapport) :** [github.com/lezoul/hotel-booking-eda-r](https://github.com/lezoul/hotel-booking-eda-r)
+
 # 0. Préparation de l'environnement
 
 Les packages nécessaires sont chargés ici. Le bloc installe automatiquement ceux qui manquent, ce qui permet d'exécuter le Notebook de haut en bas sur un autre poste.
