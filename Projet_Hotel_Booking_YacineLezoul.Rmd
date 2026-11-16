@@ -28,55 +28,17 @@ knitr::opts_chunk$set(
 
 # 0. Préparation de l'environnement
 
-Les packages nécessaires sont chargés ici. Le bloc installe automatiquement ceux qui manquent, ce qui permet d'exécuter le Notebook de haut en bas sur un autre poste.
+Le package `tidyverse` regroupe tous les outils utilisés dans ce Notebook : `readr`, `dplyr`, `tidyr` et `ggplot2`.
 
 ```{r packages}
-# Liste des packages utilisés dans tout le Notebook
-packages <- c("dplyr", "tidyr", "ggplot2", "scales", "knitr")
-
-# Installation des packages absents, puis chargement
-manquants <- packages[!packages %in% rownames(installed.packages())]
-if (length(manquants) > 0) install.packages(manquants)
-invisible(lapply(packages, library, character.only = TRUE))
+# À installer une seule fois si nécessaire :
+# install.packages("tidyverse")
+library(tidyverse)
 
 # Thème graphique commun à tous les graphiques
 theme_set(theme_minimal(base_size = 12))
 couleurs_hotel <- c("City Hotel" = "#2563eb", "Resort Hotel" = "#0ea5e9")
 couleurs_annul <- c("Non annulée" = "#16a34a", "Annulée" = "#dc2626")
-
-# Graine aléatoire (aucun tirage aléatoire n'est prévu, mais elle garantit la reproductibilité)
-set.seed(2026)
-```
-
-Deux fonctions utilitaires sont définies une seule fois puis réutilisées dans les missions 3, 6 et 8.
-
-```{r fonctions}
-# Statistiques descriptives complètes pour une variable numérique
-stats_num <- function(x) {
-  data.frame(
-    Effectif   = sum(!is.na(x)),
-    Manquants  = sum(is.na(x)),
-    Moyenne    = round(mean(x, na.rm = TRUE), 2),
-    Mediane    = round(median(x, na.rm = TRUE), 2),
-    Ecart_type = round(sd(x, na.rm = TRUE), 2),
-    Min        = round(min(x, na.rm = TRUE), 2),
-    Q1         = round(quantile(x, 0.25, na.rm = TRUE), 2),
-    Q3         = round(quantile(x, 0.75, na.rm = TRUE), 2),
-    Max        = round(max(x, na.rm = TRUE), 2),
-    IQR        = round(IQR(x, na.rm = TRUE), 2),
-    Asymetrie  = round(mean((x - mean(x, na.rm = TRUE))^3, na.rm = TRUE) /
-                         sd(x, na.rm = TRUE)^3, 2),
-    row.names = NULL
-  )
-}
-
-# Bornes de Tukey (méthode de l'écart interquartile)
-bornes_iqr <- function(x, k = 1.5) {
-  q1 <- quantile(x, 0.25, na.rm = TRUE)
-  q3 <- quantile(x, 0.75, na.rm = TRUE)
-  e  <- q3 - q1
-  c(inf = unname(q1 - k * e), sup = unname(q3 + k * e))
-}
 ```
 
 # Mission 1 : Compréhension du contexte et formulation du problème
@@ -145,13 +107,8 @@ dim(hotel)
 Le jeu contient **`r format(nrow(hotel), big.mark = " ")` observations** et **`r ncol(hotel)` variables**.
 
 ```{r types}
-# Type R de chaque variable et exemple de valeur
-data.frame(
-  Variable = names(hotel),
-  Type     = sapply(hotel, class),
-  Exemple  = sapply(hotel, function(x) as.character(x[!is.na(x)][1])),
-  row.names = NULL
-)
+# Structure du jeu : type de chaque variable et premières valeurs
+str(hotel)
 ```
 
 Plusieurs types ne correspondent pas à la nature réelle des variables :
@@ -201,6 +158,15 @@ summary(hotel[, c("lead_time", "stays_in_weekend_nights", "stays_in_week_nights"
 
 ## 2.7 Incohérences détectées
 
+Avant de construire le tableau des contrôles, on regarde la distribution du nombre d'enfants et de bébés, pour fixer un seuil fondé sur les données plutôt qu'au hasard.
+
+```{r enfants-bebes}
+table(hotel$children, useNA = "ifany")
+table(hotel$babies)
+```
+
+Les valeurs observées sont 0 à 3 enfants et 0 à 2 bébés, puis on saute directement à 9 ou 10 : **aucune réservation n'a entre 4 et 8 enfants, ni entre 3 et 8 bébés**. Les valeurs 9 et 10 sont donc isolées, très loin du maximum suivant. Elles sont retenues comme suspectes : plus de 3 enfants ou plus de 2 bébés.
+
 ```{r incoherences}
 total_occupants <- hotel$adults + ifelse(is.na(hotel$children), 0, hotel$children) + hotel$babies
 total_nuits     <- hotel$stays_in_weekend_nights + hotel$stays_in_week_nights
@@ -210,18 +176,18 @@ incoherences <- data.frame(
                "Tarif journalier égal à 0",
                "Tarif journalier supérieur à 1 000",
                "Réservation sans aucun occupant",
-               "Réservation sans adulte",
+               "Réservation sans adulte mais avec enfants ou bébés",
                "Séjour de 0 nuit",
-               "Plus de 8 bébés ou enfants",
+               "Plus de 3 enfants ou plus de 2 bébés (valeurs isolées)",
                "Catégorie 'Undefined' (meal, market_segment, distribution_channel)",
                "is_canceled incohérent avec reservation_status"),
   Nombre = c(sum(hotel$adr < 0),
              sum(hotel$adr == 0),
              sum(hotel$adr > 1000),
              sum(total_occupants == 0),
-             sum(hotel$adults == 0),
+             sum(hotel$adults == 0 & total_occupants > 0),
              sum(total_nuits == 0),
-             sum(hotel$babies > 8 | (!is.na(hotel$children) & hotel$children > 8)),
+             sum(hotel$babies > 2 | (!is.na(hotel$children) & hotel$children > 3)),
              sum(hotel$meal == "Undefined") + sum(hotel$market_segment == "Undefined") +
                sum(hotel$distribution_channel == "Undefined"),
              sum((hotel$is_canceled == 1) != (hotel$reservation_status != "Check-Out")))
@@ -229,12 +195,21 @@ incoherences <- data.frame(
 incoherences
 ```
 
+Les contrôles « sans aucun occupant » et « sans adulte mais avec enfants » sont mutuellement exclusifs : une réservation ne peut pas être comptée dans les deux.
+
+```{r enfants-bebes-detail}
+# Les réservations aux valeurs isolées d'enfants ou de bébés
+hotel[hotel$babies > 2 | (!is.na(hotel$children) & hotel$children > 3),
+      c("hotel", "is_canceled", "adults", "children", "babies", "reserved_room_type", "adr")]
+```
+
 Lecture du tableau :
 
 - **Un tarif négatif** et **un tarif de 5 400** sont des valeurs impossibles ou très suspectes (le tarif suivant le plus élevé est de `r max(hotel$adr[hotel$adr < 5000])`).
 - **`r sum(hotel$adr == 0)` tarifs nuls** peuvent être réels : séjours offerts (segment *Complementary*), employés, compensations.
 - **`r sum(total_occupants == 0)` réservations sans aucun occupant** sont impossibles.
-- **`r sum(hotel$adults == 0)` réservations sans adulte** mais avec enfants sont suspectes sans être impossibles.
+- **`r sum(hotel$adults == 0 & total_occupants > 0)` réservations sans adulte** mais avec enfants ou bébés sont suspectes sans être impossibles (par exemple, un enfant enregistré sur une chambre séparée d'un groupe familial).
+- **`r sum(hotel$babies > 2 | (!is.na(hotel$children) & hotel$children > 3))` réservations** ont 9 ou 10 bébés ou enfants pour 1 ou 2 adultes, dans une chambre standard : c'est physiquement impossible pour une seule chambre. Ce sont très probablement des fautes de frappe (10 au lieu de 1 ou 0).
 - **`r sum(total_nuits == 0)` séjours de 0 nuit** peuvent correspondre à des locations de jour (*day use*).
 - La modalité `Undefined` de `meal` correspond, selon l'article source, à la formule *SC* (sans repas) : c'est une incohérence d'étiquette.
 - `is_canceled` et `reservation_status` sont parfaitement cohérents (0 écart) : `is_canceled = 1` regroupe les statuts *Canceled* et *No-Show*.
@@ -245,40 +220,76 @@ Six variables numériques sont retenues, car elles sont directement liées aux q
 
 ## 3.1 Statistiques descriptives
 
+Les six variables sont empilées dans une seule colonne avec `pivot_longer()`, puis `group_by()` et `summarise()` calculent les statistiques de chacune.
+
 ```{r stats-num}
 vars_num <- c("lead_time", "adr", "stays_in_weekend_nights",
               "stays_in_week_nights", "adults", "booking_changes")
 
-tab_stats_num <- do.call(rbind, lapply(vars_num, function(v) cbind(Variable = v, stats_num(hotel[[v]]))))
+tab_stats_num <- hotel %>%
+  select(all_of(vars_num)) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "valeur") %>%
+  group_by(variable) %>%
+  summarise(
+    effectif   = n(),
+    manquants  = sum(is.na(valeur)),
+    moyenne    = round(mean(valeur), 2),
+    mediane    = median(valeur),
+    ecart_type = round(sd(valeur), 2),
+    min        = min(valeur),
+    Q1         = quantile(valeur, 0.25),
+    Q3         = quantile(valeur, 0.75),
+    max        = max(valeur),
+    IQR        = IQR(valeur)
+  )
 tab_stats_num
 ```
 
-Le coefficient d'asymétrie est positif pour toutes les variables : toutes les distributions s'étirent vers la droite (beaucoup de petites valeurs, quelques très grandes).
+Pour `lead_time`, `adr` et `stays_in_week_nights`, la moyenne dépasse nettement la médiane : la distribution est **asymétrique à droite** (beaucoup de petites valeurs, quelques très grandes). Pour les petites variables de comptage (`adults`, `stays_in_weekend_nights`, `booking_changes`), la comparaison moyenne/médiane est moins parlante, car elles ne prennent que quelques valeurs entières ; les diagrammes en barres ci-dessous montrent leur forme.
 
 ## 3.2 Visualisations
 
-```{r hist-num, fig.height = 7}
-hotel %>%
-  select(all_of(vars_num)) %>%
-  pivot_longer(everything(), names_to = "variable", values_to = "valeur") %>%
-  ggplot(aes(x = valeur)) +
-  geom_histogram(bins = 50, fill = "#2563eb", colour = "white") +
-  facet_wrap(~ variable, scales = "free", ncol = 2) +
-  labs(title = "Distribution des six variables numériques (données brutes)",
-       x = NULL, y = "Nombre de réservations")
+Chaque variable a son propre graphique, adapté à sa nature : **histogramme** pour les variables continues (`lead_time`, `adr`), avec une largeur d'intervalle qui a un sens métier ; **diagramme en barres** pour les variables de comptage, avec une barre par valeur réellement observée.
+
+```{r hist-lead}
+ggplot(hotel, aes(x = lead_time)) +
+  geom_histogram(binwidth = 10, fill = "#2563eb", colour = "white") +
+  labs(title = "Délai de réservation (intervalles de 10 jours)",
+       x = "lead_time (jours)", y = "Nombre de réservations")
 ```
 
-Le tarif de 5 400 écrase l'histogramme de `adr`. Un zoom sur les tarifs compris entre 0 et 500 et une boîte à moustaches par variable permettent de mieux lire les distributions.
-
-```{r adr-zoom}
-ggplot(filter(hotel, adr >= 0, adr <= 500), aes(x = adr)) +
-  geom_histogram(aes(y = after_stat(density)), bins = 60, fill = "#0ea5e9", colour = "white") +
-  geom_density(colour = "#1e293b", linewidth = 0.8) +
-  geom_vline(xintercept = median(hotel$adr), linetype = "dashed", colour = "#dc2626") +
-  labs(title = "Tarif journalier moyen (adr), zoom entre 0 et 500",
-       subtitle = "Ligne pointillée rouge : médiane",
-       x = "adr", y = "Densité")
+```{r hist-adr}
+ggplot(hotel, aes(x = adr)) +
+  geom_histogram(binwidth = 10, fill = "#0ea5e9", colour = "white") +
+  coord_cartesian(xlim = c(0, 500)) +
+  labs(title = "Tarif journalier moyen (intervalles de 10, axe limité à 500)",
+       subtitle = "La valeur de 5 400 et la valeur négative sont hors du cadre",
+       x = "adr", y = "Nombre de réservations")
 ```
+
+```{r bar-adults}
+ggplot(hotel, aes(x = factor(adults))) +
+  geom_bar(fill = "#2563eb") +
+  labs(title = "Nombre d'adultes par réservation", x = "adults", y = "Nombre de réservations")
+```
+
+```{r bar-nuits}
+ggplot(hotel, aes(x = stays_in_weekend_nights)) +
+  geom_bar(fill = "#2563eb") +
+  labs(title = "Nuits de week-end par réservation", x = "stays_in_weekend_nights", y = "Nombre de réservations")
+
+ggplot(hotel, aes(x = stays_in_week_nights)) +
+  geom_bar(fill = "#2563eb") +
+  labs(title = "Nuits en semaine par réservation", x = "stays_in_week_nights", y = "Nombre de réservations")
+```
+
+```{r bar-changes}
+ggplot(hotel, aes(x = booking_changes)) +
+  geom_bar(fill = "#2563eb") +
+  labs(title = "Nombre de modifications de la réservation", x = "booking_changes", y = "Nombre de réservations")
+```
+
+Les boîtes à moustaches résument les six variables sur un même graphique (un panneau par variable, chacun avec sa propre échelle).
 
 ```{r box-num, fig.height = 6}
 hotel %>%
@@ -293,16 +304,16 @@ hotel %>%
 ## 3.3 Description et interprétation
 
 ```{r vals-m3, include = FALSE}
-lt <- stats_num(hotel$lead_time)
-ad <- stats_num(hotel$adr)
+lt <- tab_stats_num %>% filter(variable == "lead_time")
+ad <- tab_stats_num %>% filter(variable == "adr")
 pct_lt_an <- round(100 * mean(hotel$lead_time > 365), 1)
 pct_bc0   <- round(100 * mean(hotel$booking_changes == 0), 1)
 pct_ad2   <- round(100 * mean(hotel$adults == 2), 1)
 pct_we0   <- round(100 * mean(hotel$stays_in_weekend_nights == 0), 1)
 ```
 
-- **`lead_time` (délai de réservation)** : distribution fortement asymétrique à droite. La médiane (`r lt$Mediane` jours) est nettement inférieure à la moyenne (`r lt$Moyenne` jours), tirée vers le haut par les réservations très anticipées (jusqu'à `r lt$Max` jours). La moitié des réservations sont faites entre `r lt$Q1` et `r lt$Q3` jours à l'avance. `r pct_lt_an` % des réservations sont faites plus d'un an à l'avance, ce qui correspond surtout à des réservations de groupes ou d'agences. Pour l'hôtel, cette grande dispersion signifie qu'une partie importante du carnet de réservations est connue longtemps à l'avance, donc exposée à un risque d'annulation pendant longtemps.
-- **`adr` (tarif journalier moyen)** : distribution légèrement asymétrique, centrée autour d'une médiane de `r ad$Mediane`. Elle contient des valeurs à 0 (séjours offerts), une valeur négative et une valeur extrême de 5 400. Hors de ces cas, la plupart des tarifs se situent entre `r ad$Q1` et `r ad$Q3`. La moyenne est peu affectée par la valeur de 5 400 grâce à la taille de l'échantillon, mais l'écart-type et le maximum le sont fortement.
+- **`lead_time` (délai de réservation)** : distribution fortement asymétrique à droite. La médiane (`r lt$mediane` jours) est nettement inférieure à la moyenne (`r lt$moyenne` jours), tirée vers le haut par les réservations très anticipées (jusqu'à `r lt$max` jours). La moitié des réservations sont faites entre `r lt$Q1` et `r lt$Q3` jours à l'avance. `r pct_lt_an` % des réservations sont faites plus d'un an à l'avance, ce qui correspond surtout à des réservations de groupes ou d'agences. Pour l'hôtel, cette grande dispersion signifie qu'une partie importante du carnet de réservations est connue longtemps à l'avance, donc exposée à un risque d'annulation pendant longtemps.
+- **`adr` (tarif journalier moyen)** : distribution légèrement asymétrique, centrée autour d'une médiane de `r ad$mediane`. Elle contient des valeurs à 0 (séjours offerts), une valeur négative et une valeur extrême de 5 400. Hors de ces cas, la plupart des tarifs se situent entre `r ad$Q1` et `r ad$Q3`. La moyenne est peu affectée par la valeur de 5 400 grâce à la taille de l'échantillon, mais l'écart-type et le maximum le sont fortement.
 - **`stays_in_weekend_nights` et `stays_in_week_nights`** : séjours courts. La médiane est de 1 nuit de week-end et 2 nuits en semaine ; `r pct_we0` % des réservations ne comprennent aucune nuit de week-end. Les séjours de plusieurs semaines sont rares mais existent (jusqu'à 19 nuits de week-end et 50 nuits en semaine), probablement au Resort Hotel.
 - **`adults`** : variable discrète très concentrée, `r pct_ad2` % des réservations concernent exactement 2 adultes (couples). Les valeurs 0 et celles supérieures à 4 sont rares ; quelques réservations de 20 à 55 adultes ressortent (groupes).
 - **`booking_changes`** : `r pct_bc0` % des réservations ne sont jamais modifiées. La médiane et le troisième quartile valent 0, donc l'IQR vaut 0 : toute modification apparaît comme « atypique » par la méthode IQR, ce qui montre les limites de cette méthode sur une variable de comptage.
@@ -313,25 +324,20 @@ Cinq variables catégorielles sont retenues : `hotel`, `market_segment`, `deposi
 
 ## 4.1 Effectifs et fréquences
 
-```{r freq-cat, results = "asis"}
-tab_freq <- function(data, var) {
-  data %>%
-    count(.data[[var]], name = "Effectif") %>%
-    mutate(Pourcentage = round(100 * Effectif / sum(Effectif), 2)) %>%
-    arrange(desc(Effectif)) %>%
-    rename(Modalite = 1)
-}
+Pour chaque variable, `count()` donne les effectifs et `mutate()` calcule le pourcentage.
 
-vars_cat <- c("hotel", "is_canceled", "market_segment", "deposit_type",
-              "customer_type", "reservation_status")
-
-for (v in vars_cat) {
-  cat("\n**", v, "**\n", sep = "")
-  print(knitr::kable(tab_freq(hotel, v)))
-}
+```{r freq-cat}
+hotel %>% count(hotel, sort = TRUE) %>% mutate(pourcentage = round(100 * n / sum(n), 2))
+hotel %>% count(is_canceled, sort = TRUE) %>% mutate(pourcentage = round(100 * n / sum(n), 2))
+hotel %>% count(market_segment, sort = TRUE) %>% mutate(pourcentage = round(100 * n / sum(n), 2))
+hotel %>% count(deposit_type, sort = TRUE) %>% mutate(pourcentage = round(100 * n / sum(n), 2))
+hotel %>% count(customer_type, sort = TRUE) %>% mutate(pourcentage = round(100 * n / sum(n), 2))
+hotel %>% count(reservation_status, sort = TRUE) %>% mutate(pourcentage = round(100 * n / sum(n), 2))
 ```
 
 ## 4.2 Visualisations
+
+Les cinq variables sont empilées avec `pivot_longer()`, puis `facet_wrap()` crée un panneau par variable.
 
 ```{r bar-cat, fig.height = 8}
 hotel %>%
@@ -339,44 +345,38 @@ hotel %>%
   pivot_longer(everything(), names_to = "variable", values_to = "modalite") %>%
   count(variable, modalite) %>%
   group_by(variable) %>%
-  mutate(pct = n / sum(n)) %>%
-  ungroup() %>%
-  ggplot(aes(x = reorder(modalite, pct), y = pct)) +
+  mutate(pourcentage = 100 * n / sum(n)) %>%
+  ggplot(aes(x = reorder(modalite, pourcentage), y = pourcentage)) +
   geom_col(fill = "#2563eb") +
-  geom_text(aes(label = percent(pct, accuracy = 0.1)), hjust = -0.1, size = 3.2) +
+  geom_text(aes(label = sprintf("%.1f %%", pourcentage)), hjust = -0.1, size = 3.2) +
   coord_flip() +
   facet_wrap(~ variable, scales = "free_y", ncol = 2) +
-  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.25))) +
-  labs(title = "Répartition des variables catégorielles", x = NULL, y = "Part des réservations")
+  ylim(0, 110) +
+  labs(title = "Répartition des variables catégorielles", x = NULL, y = "Part des réservations (%)")
 ```
 
 ```{r prop-annul, fig.height = 2.5}
 hotel %>%
   mutate(statut = ifelse(is_canceled == 1, "Annulée", "Non annulée")) %>%
   count(statut) %>%
-  mutate(pct = n / sum(n)) %>%
-  ggplot(aes(x = "", y = pct, fill = statut)) +
+  mutate(pourcentage = 100 * n / sum(n)) %>%
+  ggplot(aes(x = "", y = pourcentage, fill = statut)) +
   geom_col(width = 0.5) +
-  geom_text(aes(label = percent(pct, accuracy = 0.1)), position = position_stack(vjust = 0.5),
+  geom_text(aes(label = sprintf("%.1f %%", pourcentage)), position = position_stack(vjust = 0.5),
             colour = "white", fontface = "bold") +
   coord_flip() +
   scale_fill_manual(values = couleurs_annul) +
-  scale_y_continuous(labels = percent) +
-  labs(title = "Proportion de réservations annulées", x = NULL, y = NULL, fill = NULL)
+  labs(title = "Proportion de réservations annulées", x = NULL, y = "%", fill = NULL)
 ```
 
 ## 4.3 Interprétation
 
-```{r vals-m4, include = FALSE}
-p <- function(var, mod) round(100 * mean(hotel[[var]] == mod), 1)
-```
-
-- **`hotel`** : le City Hotel représente `r p("hotel", "City Hotel")` % des réservations, soit environ deux fois plus que le Resort Hotel. Toute statistique globale est donc dominée par le City Hotel ; les comparaisons doivent se faire par hôtel.
+- **`hotel`** : le City Hotel représente `r round(100 * mean(hotel$hotel == "City Hotel"), 1)` % des réservations, soit environ deux fois plus que le Resort Hotel. Toute statistique globale est donc dominée par le City Hotel ; les comparaisons doivent se faire par hôtel.
 - **`is_canceled`** : `r round(100 * mean(hotel$is_canceled), 1)` % des réservations sont annulées. Ce taux est élevé et confirme l'importance de l'enjeu pour les deux établissements.
-- **`market_segment`** : les agences de voyage en ligne (*Online TA*, `r p("market_segment", "Online TA")` %) dominent, devant les agences hors ligne (*Offline TA/TO*, `r p("market_segment", "Offline TA/TO")` %) et les groupes (`r p("market_segment", "Groups")` %). Les réservations directes ne pèsent que `r p("market_segment", "Direct")` %. Les hôtels dépendent donc fortement des intermédiaires.
-- **`deposit_type`** : `r p("deposit_type", "No Deposit")` % des réservations sont faites sans dépôt. Les réservations non remboursables (*Non Refund*) représentent `r p("deposit_type", "Non Refund")` %, et les dépôts remboursables sont presque inexistants (`r p("deposit_type", "Refundable")` %).
-- **`customer_type`** : la clientèle individuelle (*Transient*, `r p("customer_type", "Transient")` %) domine, suivie des individus liés à d'autres réservations (*Transient-Party*). Les contrats et groupes sont minoritaires.
-- **`reservation_status`** : `r p("reservation_status", "Check-Out")` % des séjours ont eu lieu (*Check-Out*), `r p("reservation_status", "Canceled")` % ont été annulés et `r p("reservation_status", "No-Show")` % sont des non-présentations. Les *No-Show* sont rares mais coûteux, car la chambre est restée vide sans préavis.
+- **`market_segment`** : les agences de voyage en ligne (*Online TA*, `r round(100 * mean(hotel$market_segment == "Online TA"), 1)` %) dominent, devant les agences hors ligne (*Offline TA/TO*, `r round(100 * mean(hotel$market_segment == "Offline TA/TO"), 1)` %) et les groupes (`r round(100 * mean(hotel$market_segment == "Groups"), 1)` %). Les réservations directes ne pèsent que `r round(100 * mean(hotel$market_segment == "Direct"), 1)` %. Les hôtels dépendent donc fortement des intermédiaires.
+- **`deposit_type`** : `r round(100 * mean(hotel$deposit_type == "No Deposit"), 1)` % des réservations sont faites sans dépôt. Les réservations non remboursables (*Non Refund*) représentent `r round(100 * mean(hotel$deposit_type == "Non Refund"), 1)` %, et les dépôts remboursables sont presque inexistants (`r round(100 * mean(hotel$deposit_type == "Refundable"), 1)` %).
+- **`customer_type`** : la clientèle individuelle (*Transient*, `r round(100 * mean(hotel$customer_type == "Transient"), 1)` %) domine, suivie des individus liés à d'autres réservations (*Transient-Party*). Les contrats et groupes sont minoritaires.
+- **`reservation_status`** : `r round(100 * mean(hotel$reservation_status == "Check-Out"), 1)` % des séjours ont eu lieu (*Check-Out*), `r round(100 * mean(hotel$reservation_status == "Canceled"), 1)` % ont été annulés et `r round(100 * mean(hotel$reservation_status == "No-Show"), 1)` % sont des non-présentations. Les *No-Show* sont rares mais coûteux, car la chambre est restée vide sans préavis.
 
 # Mission 5 : Analyse des données manquantes
 
@@ -401,12 +401,12 @@ tab_na
 ### A.2 Visualisation de la répartition
 
 ```{r na-plot, fig.height = 3.5}
-ggplot(tab_na, aes(x = reorder(Variable, Pourcentage), y = Pourcentage / 100)) +
+ggplot(tab_na, aes(x = reorder(Variable, Pourcentage), y = Pourcentage)) +
   geom_col(fill = "#dc2626") +
   geom_text(aes(label = paste0(signif(Pourcentage, 3), " %")), hjust = -0.1) +
   coord_flip() +
-  scale_y_continuous(labels = percent, limits = c(0, 1.08)) +
-  labs(title = "Part de valeurs manquantes par variable", x = NULL, y = NULL)
+  ylim(0, 108) +
+  labs(title = "Part de valeurs manquantes par variable", x = NULL, y = "%")
 ```
 
 ### A.3 Combinaisons d'absences
@@ -429,21 +429,20 @@ Le motif le plus fréquent est « agent présent, company manquante ». Seule un
 ```{r na-groupes, fig.height = 6}
 na_groupes <- bind_rows(
   hotel %>% group_by(groupe = market_segment) %>%
-    summarise(taux = mean(is.na(company))) %>% mutate(variable = "company selon market_segment"),
+    summarise(taux = 100 * mean(is.na(company))) %>% mutate(variable = "company selon market_segment"),
   hotel %>% group_by(groupe = distribution_channel) %>%
-    summarise(taux = mean(is.na(agent))) %>% mutate(variable = "agent selon distribution_channel"),
+    summarise(taux = 100 * mean(is.na(agent))) %>% mutate(variable = "agent selon distribution_channel"),
   hotel %>% group_by(groupe = hotel) %>%
-    summarise(taux = mean(is.na(country))) %>% mutate(variable = "country selon hotel"),
+    summarise(taux = 100 * mean(is.na(country))) %>% mutate(variable = "country selon hotel"),
   hotel %>% group_by(groupe = as.character(arrival_date_year)) %>%
-    summarise(taux = mean(is.na(country))) %>% mutate(variable = "country selon arrival_date_year")
+    summarise(taux = 100 * mean(is.na(country))) %>% mutate(variable = "country selon arrival_date_year")
 )
 
 ggplot(na_groupes, aes(x = reorder(groupe, taux), y = taux)) +
   geom_col(fill = "#f59e0b") +
   coord_flip() +
   facet_wrap(~ variable, scales = "free", ncol = 2) +
-  scale_y_continuous(labels = percent) +
-  labs(title = "Taux de valeurs manquantes selon différents groupes", x = NULL, y = "Taux de manquants")
+  labs(title = "Taux de valeurs manquantes selon différents groupes", x = NULL, y = "Taux de manquants (%)")
 ```
 
 ```{r na-country-annul}
@@ -504,12 +503,14 @@ s1 <- hotel %>% filter(!is.na(children))
 med_children <- median(hotel$children, na.rm = TRUE)
 s2 <- hotel %>% mutate(children = ifelse(is.na(children), med_children, children))
 
-comparaison_children <- rbind(
-  cbind(Version = "Avant (NA exclus)", stats_num(hotel$children)),
-  cbind(Version = "Suppression",       stats_num(s1$children)),
-  cbind(Version = "Imputation médiane", stats_num(s2$children))
+data.frame(
+  Version    = c("Avant (NA exclus)", "Suppression", "Imputation médiane"),
+  Effectif   = c(sum(!is.na(hotel$children)), nrow(s1), nrow(s2)),
+  Manquants  = c(sum(is.na(hotel$children)), sum(is.na(s1$children)), sum(is.na(s2$children))),
+  Moyenne    = round(c(mean(hotel$children, na.rm = TRUE), mean(s1$children), mean(s2$children)), 4),
+  Mediane    = c(median(hotel$children, na.rm = TRUE), median(s1$children), median(s2$children)),
+  Ecart_type = round(c(sd(hotel$children, na.rm = TRUE), sd(s1$children), sd(s2$children)), 4)
 )
-comparaison_children[, c("Version", "Effectif", "Manquants", "Moyenne", "Mediane", "Ecart_type", "Max")]
 
 c(taux_annulation_avant       = mean(hotel$is_canceled),
   taux_annulation_suppression = mean(s1$is_canceled),
@@ -528,7 +529,8 @@ c1 <- hotel %>% filter(!is.na(country))
 # Stratégie 2 : modalité explicite "Inconnu"
 c2 <- hotel %>% mutate(country = ifelse(is.na(country), "Inconnu", country))
 # Stratégie 3 (pour comparaison) : imputation par le mode
-mode_country <- names(sort(table(hotel$country), decreasing = TRUE))[1]
+tab_pays <- hotel %>% filter(!is.na(country)) %>% count(country, sort = TRUE)
+mode_country <- tab_pays$country[1]
 c3 <- hotel %>% mutate(country = ifelse(is.na(country), mode_country, country))
 
 data.frame(
@@ -586,26 +588,31 @@ hotel_out %>%
 Une observation est déclarée atypique si elle se situe en dehors de l'intervalle [Q1 - 1,5 × IQR ; Q3 + 1,5 × IQR].
 
 ```{r out-iqr}
-detection <- do.call(rbind, lapply(vars_out, function(v) {
-  x <- hotel_out[[v]]
-  b <- bornes_iqr(x)
-  n_out <- sum(x < b["inf"] | x > b["sup"])
-  data.frame(Variable = v,
-             Borne_inf = round(b["inf"], 2), Borne_sup = round(b["sup"], 2),
-             Atypiques = n_out, Pourcentage = round(100 * n_out / length(x), 2),
-             Min_atypique = round(min(x[x < b["inf"] | x > b["sup"]]), 2),
-             Max_atypique = round(max(x[x < b["inf"] | x > b["sup"]]), 2),
-             row.names = NULL)
-}))
+detection <- hotel_out %>%
+  select(all_of(vars_out)) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "valeur") %>%
+  group_by(variable) %>%
+  summarise(
+    Q1          = quantile(valeur, 0.25),
+    Q3          = quantile(valeur, 0.75),
+    IQR         = IQR(valeur),
+    borne_inf   = Q1 - 1.5 * IQR,
+    borne_sup   = Q3 + 1.5 * IQR,
+    atypiques   = sum(valeur < borne_inf | valeur > borne_sup),
+    pourcentage = round(100 * atypiques / n(), 2)
+  )
 detection
 ```
 
 ## 6.3 Examen des atypiques dans leur contexte métier
 
 ```{r out-contexte}
-# lead_time : qui réserve plus d'un an à l'avance ?
+# lead_time : borne supérieure de Tukey, puis segments des réservations au-delà
+lt_q1  <- quantile(hotel_out$lead_time, 0.25)
+lt_q3  <- quantile(hotel_out$lead_time, 0.75)
+lt_sup <- lt_q3 + 1.5 * IQR(hotel_out$lead_time)
 hotel_out %>%
-  filter(lead_time > bornes_iqr(lead_time)["sup"]) %>%
+  filter(lead_time > lt_sup) %>%
   count(market_segment, sort = TRUE) %>%
   mutate(pct = round(100 * n / sum(n), 1))
 
@@ -625,7 +632,6 @@ hotel_out %>% filter(total_nights > 21) %>%
 ```
 
 ```{r vals-m6, include = FALSE}
-lt_sup   <- bornes_iqr(hotel_out$lead_time)["sup"]
 seg_lt   <- hotel_out %>% filter(lead_time > lt_sup) %>% count(market_segment, sort = TRUE) %>% mutate(p = round(100 * n / sum(n), 1))
 n_ad10   <- sum(hotel_out$adults >= 10)
 an_ad10  <- round(100 * mean(hotel_out$is_canceled[hotel_out$adults >= 10]), 0)
@@ -640,23 +646,18 @@ an_ad10  <- round(100 * mean(hotel_out$is_canceled[hotel_out$adults >= 10]), 0)
 
 | Variable | Méthode | Atypiques (IQR) | Caractéristiques | Décision | Justification |
 |:---|:---|---:|:---|:---|:---|
-| `lead_time` | Boxplot + IQR | `r detection$Atypiques[1]` (`r detection$Pourcentage[1]` %) | Groupes et agences hors ligne | **Conserver** | Comportement réel de réservation anticipée |
-| `adr` | Boxplot + IQR + examen | `r detection$Atypiques[2]` (`r detection$Pourcentage[2]` %) | Grandes chambres, haute saison ; 1 valeur à 5 400 ; 1 valeur négative | **Conserver**, sauf **exclure** les 2 lignes erronées | 5 400 et -6,38 sont des erreurs manifestes ; les autres sont plausibles |
-| `adults` | Boxplot + IQR + examen | `r detection$Atypiques[3]` (`r detection$Pourcentage[3]` %) | IQR nul ; groupes de 10 à 55 adultes annulés | **Conserver** (signaler les groupes) | Valeurs rares mais possibles ; les réservations à 0 occupant sont traitées comme incohérences (mission 7) |
-| `total_nights` | Boxplot + IQR | `r detection$Atypiques[4]` (`r detection$Pourcentage[4]` %) | Longs séjours au Resort Hotel | **Conserver** | Séjours saisonniers plausibles |
+| `lead_time` | Boxplot + IQR | `r detection$atypiques[detection$variable == "lead_time"]` (`r detection$pourcentage[detection$variable == "lead_time"]` %) | Groupes et agences hors ligne | **Conserver** | Comportement réel de réservation anticipée |
+| `adr` | Boxplot + IQR + examen | `r detection$atypiques[detection$variable == "adr"]` (`r detection$pourcentage[detection$variable == "adr"]` %) | Grandes chambres, haute saison ; 1 valeur à 5 400 ; 1 valeur négative | **Conserver**, sauf **exclure** les 2 lignes erronées | 5 400 et -6,38 sont des erreurs manifestes ; les autres sont plausibles |
+| `adults` | Boxplot + IQR + examen | `r detection$atypiques[detection$variable == "adults"]` (`r detection$pourcentage[detection$variable == "adults"]` %) | IQR nul ; groupes de 10 à 55 adultes annulés | **Conserver** (signaler les groupes) | Valeurs rares mais possibles ; les réservations à 0 occupant sont traitées comme incohérences (mission 7) |
+| `total_nights` | Boxplot + IQR | `r detection$atypiques[detection$variable == "total_nights"]` (`r detection$pourcentage[detection$variable == "total_nights"]` %) | Longs séjours au Resort Hotel | **Conserver** | Séjours saisonniers plausibles |
 
 # Mission 7 : Nettoyage et préparation des données
 
-Toutes les opérations partent de la copie de travail ; `hotel_raw` reste intact. Chaque étape est tracée dans un journal.
+Toutes les opérations partent d'une copie ; `hotel_raw` reste intact. Après chaque étape, le nombre de lignes est noté (`n_0`, `n_1`...) pour construire le journal des opérations à la fin de la mission.
 
-```{r clean-journal}
-journal <- data.frame(Etape = character(), Operation = character(),
-                      Lignes_apres = integer(), stringsAsFactors = FALSE)
-note <- function(etape, operation, df) {
-  journal[nrow(journal) + 1, ] <<- list(etape, operation, nrow(df))
-}
+```{r clean-depart}
 clean <- hotel_raw
-note("0", "Jeu original", clean)
+n_0 <- nrow(clean)
 ```
 
 ## 7.1 Doublons
@@ -675,7 +676,7 @@ clean %>% filter(duplicated(clean)) %>% count(market_segment, sort = TRUE) %>%
 
 ```{r clean-doublons-flag}
 clean$is_duplicate <- as.integer(duplicated(clean))
-note("1", "Doublons conservés, indicateur is_duplicate créé", clean)
+n_1 <- nrow(clean)
 ```
 
 ## 7.2 Incohérences et valeurs aberrantes manifestes
@@ -683,16 +684,17 @@ note("1", "Doublons conservés, indicateur is_duplicate créé", clean)
 ```{r clean-incoherences}
 # a) Tarif négatif et tarif de 5 400 : erreurs manifestes, exclues
 clean <- clean %>% filter(adr >= 0, adr < 5000)
-note("2a", "Exclusion du tarif négatif et du tarif de 5 400", clean)
+n_2a <- nrow(clean)
 
 # b) Réservations sans aucun occupant : impossibles, exclues
 clean <- clean %>%
   filter(adults + ifelse(is.na(children), 0, children) + babies > 0)
-note("2b", "Exclusion des réservations sans occupant", clean)
+n_2b <- nrow(clean)
 
-# c) 9 ou 10 bébés/enfants pour 1 ou 2 adultes : erreurs de saisie manifestes, exclues
-clean <- clean %>% filter(babies < 9, is.na(children) | children < 9)
-note("2c", "Exclusion des réservations avec 9 ou 10 bébés/enfants", clean)
+# c) Valeurs isolées (9 ou 10 bébés/enfants pour 1 ou 2 adultes) : erreurs de saisie, exclues
+#    Seuils = maximum observé hors valeurs isolées (3 enfants, 2 bébés), voir mission 2.7
+clean <- clean %>% filter(babies <= 2, is.na(children) | children <= 3)
+n_2c <- nrow(clean)
 ```
 
 Les tarifs nuls, les séjours de 0 nuit, les réservations sans adulte (mais avec enfants) et les grands groupes sont **conservés** : ce sont des situations rares mais possibles. Ils sont repérables grâce aux nouvelles variables créées plus bas.
@@ -709,7 +711,7 @@ clean <- clean %>%
     agent       = ifelse(is.na(agent), "Aucun", as.character(agent)),
     company     = ifelse(is.na(company), "Aucun", as.character(company))
   )
-note("3", "Traitement des valeurs manquantes (children, country, agent, company)", clean)
+n_3 <- nrow(clean)
 sum(is.na(clean))
 ```
 
@@ -722,7 +724,7 @@ clean <- clean %>%
     market_segment       = ifelse(market_segment == "Undefined", "Inconnu", market_segment),
     distribution_channel = ifelse(distribution_channel == "Undefined", "Inconnu", distribution_channel)
   )
-note("4", "Harmonisation : meal Undefined -> SC ; Undefined -> Inconnu", clean)
+n_4 <- nrow(clean)
 table(clean$meal)
 ```
 
@@ -741,7 +743,7 @@ clean <- clean %>%
              reserved_room_type, assigned_room_type, deposit_type,
              customer_type, reservation_status, agent, company), as.factor)
   )
-note("5", "Correction des types (facteurs, mois ordonnés, date)", clean)
+n_5 <- nrow(clean)
 ```
 
 `is_canceled` et `is_repeated_guest` restent codées 0/1 dans le fichier exporté (format pratique pour calculer des taux), et une version étiquetée `statut_annulation` est ajoutée pour les graphiques.
@@ -768,7 +770,7 @@ clean <- clean %>%
     statut_annulation = factor(ifelse(is_canceled == 1, "Annulée", "Non annulée"),
                                levels = c("Non annulée", "Annulée"))
   )
-note("6", "Création de 8 nouvelles variables", clean)
+n_6 <- nrow(clean)
 ```
 
 | Nouvelle variable | Définition | Utilité |
@@ -787,7 +789,23 @@ note("6", "Création de 8 nouvelles variables", clean)
 ## 7.7 Comparaison avant / après et export
 
 ```{r clean-comparaison}
+# Journal des opérations
+journal <- data.frame(
+  Etape = c("0", "1", "2a", "2b", "2c", "3", "4", "5", "6"),
+  Operation = c("Jeu original",
+                "Doublons conservés, indicateur is_duplicate créé",
+                "Exclusion du tarif négatif et du tarif de 5 400",
+                "Exclusion des réservations sans occupant",
+                "Exclusion des valeurs isolées de bébés/enfants (9 ou 10)",
+                "Traitement des valeurs manquantes (children, country, agent, company)",
+                "Harmonisation : meal Undefined -> SC ; Undefined -> Inconnu",
+                "Correction des types (facteurs, mois ordonnés, date)",
+                "Création de 8 nouvelles variables"),
+  Lignes_apres = c(n_0, n_1, n_2a, n_2b, n_2c, n_3, n_4, n_5, n_6)
+)
 journal
+
+# Comparaison avant / après
 
 data.frame(
   Indicateur = c("Observations", "Variables", "Valeurs manquantes", "Taux d'annulation",
@@ -841,7 +859,7 @@ clean %>% group_by(hotel) %>%
 ```
 
 ```{r vals-8a, include = FALSE}
-rho <- round(unname(cor_spearman$estimate), 3)
+rho <- round(as.numeric(cor_spearman$estimate), 3)
 ```
 
 ```{r vals-8a-hotel, include = FALSE}
@@ -912,14 +930,9 @@ Le tarif médian est de **`r med_b2$m[med_b2$hotel == "City Hotel"]`** au City H
 
 ## Partie C : Catégorielle - Catégorielle
 
-Une fonction calcule le V de Cramer, qui mesure l'intensité de l'association (0 = aucune, 1 = parfaite), indépendamment de la taille de l'échantillon.
+Pour chaque couple, on construit le tableau croisé, les pourcentages en ligne, le test du Khi-deux, puis le **V de Cramer**, calculé comme dans le cours à partir de la statistique du Khi-deux : `V = sqrt(chi2 / (N * min(r - 1, k - 1)))`. Il mesure l'intensité de l'association (0 = aucune, 1 = parfaite), indépendamment de la taille de l'échantillon.
 
-```{r cramer}
-v_cramer <- function(tab) {
-  chi <- suppressWarnings(chisq.test(tab, correct = FALSE))
-  sqrt(unname(chi$statistic) / (sum(tab) * (min(dim(tab)) - 1)))
-}
-```
+Barème du cours (module 8, Cohen) : V < 0,10 négligeable ; 0,10 à 0,30 faible à modérée ; 0,30 à 0,50 modérée à forte ; V ≥ 0,50 très forte.
 
 ### C.1 Type d'hôtel et annulation (Q1)
 
@@ -930,7 +943,11 @@ round(100 * prop.table(tab_c1, margin = 1), 1)   # pourcentages en ligne
 
 chi_c1 <- chisq.test(tab_c1)
 chi_c1
-v_c1 <- v_cramer(tab_c1)
+chi_c1$expected                                   # effectifs attendus (tous >= 5 ?)
+
+# V de Cramer
+chi2_c1 <- as.numeric(chi_c1$statistic)
+v_c1 <- sqrt(chi2_c1 / (sum(tab_c1) * min(nrow(tab_c1) - 1, ncol(tab_c1) - 1)))
 round(v_c1, 3)
 ```
 
@@ -943,19 +960,27 @@ round(100 * prop.table(tab_c2, margin = 1), 1)
 
 chi_c2 <- chisq.test(tab_c2)
 chi_c2
-v_c2 <- v_cramer(tab_c2)
+chi_c2$expected
+
+chi2_c2 <- as.numeric(chi_c2$statistic)
+v_c2 <- sqrt(chi2_c2 / (sum(tab_c2) * min(nrow(tab_c2) - 1, ncol(tab_c2) - 1)))
 round(v_c2, 3)
 ```
 
 ### C.3 Segment de marché et annulation (Q3)
 
 ```{r biv-c3}
-tab_c3 <- table(droplevels(clean$market_segment[clean$market_segment != "Inconnu"]),
-                clean$statut_annulation[clean$market_segment != "Inconnu"])
+segments <- clean %>% filter(market_segment != "Inconnu")
+tab_c3 <- table(as.character(segments$market_segment), segments$statut_annulation)
+tab_c3
 round(100 * prop.table(tab_c3, margin = 1), 1)
+
 chi_c3 <- chisq.test(tab_c3)
 chi_c3
-v_c3 <- v_cramer(tab_c3)
+chi_c3$expected
+
+chi2_c3 <- as.numeric(chi_c3$statistic)
+v_c3 <- sqrt(chi2_c3 / (sum(tab_c3) * min(nrow(tab_c3) - 1, ncol(tab_c3) - 1)))
 round(v_c3, 3)
 ```
 
@@ -964,27 +989,27 @@ La modalité « Inconnu » (2 réservations) est retirée de ce test : ses effec
 ### C.4 Diagramme en proportions
 
 ```{r biv-c-plot, fig.height = 7}
-bind_rows(
+# 1. Pourcentages par modalité pour les trois variables
+proportions_df <- bind_rows(
   clean %>% count(modalite = as.character(hotel), statut_annulation) %>% mutate(variable = "hotel"),
   clean %>% count(modalite = as.character(deposit_type), statut_annulation) %>% mutate(variable = "deposit_type"),
-  clean %>% filter(market_segment != "Inconnu") %>%
-    count(modalite = as.character(market_segment), statut_annulation) %>% mutate(variable = "market_segment")
+  segments %>% count(modalite = as.character(market_segment), statut_annulation) %>% mutate(variable = "market_segment")
 ) %>%
   group_by(variable, modalite) %>%
-  mutate(pct = n / sum(n)) %>%
-  ungroup() %>%
-  ggplot(aes(x = modalite, y = pct, fill = statut_annulation)) +
+  mutate(pourcentage = 100 * n / sum(n),
+         etiquette = ifelse(statut_annulation == "Annulée", sprintf("%.0f %%", pourcentage), ""))
+
+# 2. Barres empilées à 100 %
+ggplot(proportions_df, aes(x = modalite, y = pourcentage, fill = statut_annulation)) +
   geom_col() +
-  geom_text(data = function(d) filter(d, statut_annulation == "Annulée"),
-            aes(label = percent(pct, accuracy = 1)), position = position_stack(vjust = 0.5),
+  geom_text(aes(label = etiquette), position = position_stack(vjust = 0.5),
             colour = "white", size = 3.2, fontface = "bold") +
   coord_flip() +
   facet_wrap(~ variable, scales = "free_y", ncol = 1) +
   scale_fill_manual(values = couleurs_annul) +
-  scale_y_continuous(labels = percent) +
   labs(title = "Part des réservations annulées",
        subtitle = "Selon le type d'hôtel, le type de dépôt et le segment de marché",
-       x = NULL, y = NULL, fill = NULL)
+       x = NULL, y = "%", fill = NULL)
 ```
 
 ### C.5 Interprétation
@@ -999,13 +1024,13 @@ seg_min <- rownames(pc3)[which.min(pc3[, "Annulée"])]
 
 | Association | Khi-deux (p-value) | V de Cramer | Intensité |
 |:---|:---|---:|:---|
-| `hotel` × annulation | p < 0,001 | `r round(v_c1, 3)` | Faible |
-| `deposit_type` × annulation | p < 0,001 | `r round(v_c2, 3)` | Forte |
-| `market_segment` × annulation | p < 0,001 | `r round(v_c3, 3)` | Modérée |
+| `hotel` × annulation | p < 0,001 | `r round(v_c1, 3)` | Faible à modérée |
+| `deposit_type` × annulation | p < 0,001 | `r round(v_c2, 3)` | Modérée à forte |
+| `market_segment` × annulation | p < 0,001 | `r round(v_c3, 3)` | Faible à modérée |
 
-- **Hôtel** : le City Hotel annule `r pc1["City Hotel", "Annulée"]` % de ses réservations contre `r pc1["Resort Hotel", "Annulée"]` % pour le Resort Hotel. L'association est significative mais d'intensité faible : le type d'hôtel seul explique peu les annulations.
-- **Type de dépôt** : résultat le plus marquant. Les réservations **non remboursables** sont annulées dans **`r pc2["Non Refund", "Annulée"]` %** des cas, contre `r pc2["No Deposit", "Annulée"]` % sans dépôt. Ce résultat est contre-intuitif : un client qui a payé d'avance devrait moins annuler. Les réservations non remboursables proviennent presque toutes des segments *Groups* et *Offline TA/TO*, avec un délai médian de `r median(clean$lead_time[clean$deposit_type == "Non Refund"])` jours. Le résultat est donc probablement lié à des pratiques d'agences ou de groupes qui bloquent des chambres en grand nombre (souvent avec un délai très long) puis libèrent celles qui ne sont pas vendues. Ce n'est donc pas le dépôt qui « cause » l'annulation, mais un type de réservation qui combine les deux.
-- **Segment de marché** : le segment *`r seg_max`* présente le taux d'annulation le plus élevé (`r pc3[seg_max, "Annulée"]` %) et le segment *`r seg_min`* le plus faible (`r pc3[seg_min, "Annulée"]` %). Les réservations d'agences en ligne, faciles à annuler, sont aussi parmi les plus annulées.
+- **Hôtel** : le City Hotel annule `r pc1["City Hotel", "Annulée"]` % de ses réservations contre `r pc1["Resort Hotel", "Annulée"]` % pour le Resort Hotel. L'association est significative mais d'intensité faible à modérée (V proche du bas de l'intervalle) : le type d'hôtel seul explique peu les annulations.
+- **Type de dépôt** : résultat le plus marquant, avec l'association la plus forte des trois (modérée à forte, V proche de 0,5). Les réservations **non remboursables** sont annulées dans **`r pc2["Non Refund", "Annulée"]` %** des cas, contre `r pc2["No Deposit", "Annulée"]` % sans dépôt. Ce résultat est contre-intuitif : un client qui a payé d'avance devrait moins annuler. Les réservations non remboursables proviennent presque toutes des segments *Groups* et *Offline TA/TO*, avec un délai médian de `r median(clean$lead_time[clean$deposit_type == "Non Refund"])` jours. Le résultat est donc probablement lié à des pratiques d'agences ou de groupes qui bloquent des chambres en grand nombre (souvent avec un délai très long) puis libèrent celles qui ne sont pas vendues. Ce n'est donc pas le dépôt qui « cause » l'annulation, mais un type de réservation qui combine les deux.
+- **Segment de marché** : le segment *`r seg_max`* présente le taux d'annulation le plus élevé (`r pc3[seg_max, "Annulée"]` %) et le segment *`r seg_min`* le plus faible (`r pc3[seg_min, "Annulée"]` %). Les réservations d'agences en ligne, faciles à annuler, sont aussi parmi les plus annulées. L'association est faible à modérée, mais nettement plus marquée que pour le type d'hôtel.
 
 **Précautions** : ces associations ne démontrent pas de causalité ; la p-value, quasi nulle partout, reflète surtout la grande taille de l'échantillon, d'où l'importance du V de Cramer pour juger l'intensité. Les doublons conservés peuvent aussi amplifier le poids de certains groupes dans ces tableaux.
 
@@ -1025,10 +1050,10 @@ Nous cherchions à identifier les caractéristiques des réservations associées
 
 | Question | Résultat | Intensité |
 |:---|:---|:---|
-| Q1 : annulation selon l'hôtel | City Hotel `r pc1["City Hotel", "Annulée"]` % contre Resort Hotel `r pc1["Resort Hotel", "Annulée"]` % | Faible (V = `r round(v_c1, 2)`) |
+| Q1 : annulation selon l'hôtel | City Hotel `r pc1["City Hotel", "Annulée"]` % contre Resort Hotel `r pc1["Resort Hotel", "Annulée"]` % | Faible à modérée (V = `r round(v_c1, 2)`) |
 | Q2 : délai et annulation | Délai médian `r med_b1$m[med_b1$statut_annulation == "Annulée"]` j (annulées) contre `r med_b1$m[med_b1$statut_annulation == "Non annulée"]` j (non annulées) | Écart net, Wilcoxon p < 0,001 |
-| Q3 : dépôt et annulation | Non Refund annulées à `r pc2["Non Refund", "Annulée"]` % | Forte (V = `r round(v_c2, 2)`) |
-| Q3 : segment et annulation | *`r seg_max`* le plus annulé (`r pc3[seg_max, "Annulée"]` %) | Modérée (V = `r round(v_c3, 2)`) |
+| Q3 : dépôt et annulation | Non Refund annulées à `r pc2["Non Refund", "Annulée"]` % | Modérée à forte (V = `r round(v_c2, 2)`) |
+| Q3 : segment et annulation | *`r seg_max`* le plus annulé (`r pc3[seg_max, "Annulée"]` %) | Faible à modérée (V = `r round(v_c3, 2)`) |
 | Q4 : tarif selon hôtel et clientèle | Tarif médian plus élevé au City Hotel ; tarifs plus bas pour les groupes et contrats | Différences significatives |
 | Q5 : délai et tarif | Relation nulle au global, de sens opposés selon l'hôtel | Quasi nulle (ρ = `r rho`) ; City `r rho_city`, Resort `r rho_resort` |
 
